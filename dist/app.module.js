@@ -16,7 +16,7 @@ let AppModule = class AppModule {
 exports.AppModule = AppModule;
 exports.AppModule = AppModule = __decorate([
     (0, common_1.Module)({
-        imports: [mongoose_1.MongooseModule.forRoot("mongodb+srv://alimboyevjayxun007:jQHT0xNZIhNZGEv5@cluster0.nlou3gl.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"),
+        imports: [mongoose_1.MongooseModule.forRoot("mongodb+srv://alimboyevjayxun007:ecW5TizRwqTXwrde@fastfoodbot.elc8enu.mongodb.net/?retryWrites=true&w=majority&appName=fastFoodBot"),
             config_1.ConfigModule.forRoot({ envFilePath: ".env", isGlobal: true }), bot_module_1.BotModule]
     })
 ], AppModule);

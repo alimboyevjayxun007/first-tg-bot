@@ -4,13 +4,14 @@ export declare class BotService {
     private userModel;
     private bot;
     private readonly ownerID;
-    private userSessions;
-    private aiModeUsers;
-    private genAI;
-    private aiModel;
+    private userOrders;
+    private processedMessageIds;
+    private products;
     constructor(userModel: Model<UserDocument>);
-    private generateQuestions;
-    private askGemini;
-    private askGeminiWithImage;
+    private sendProducts;
+    private promptForPhoneNumber;
+    private isMessageProcessed;
+    private addProcessedMessage;
+    private sendBroadcast;
     private downloadFile;
 }

@@ -4,7 +4,7 @@ import { BotModule } from './bot/bot.module';
 import { MongooseModule } from '@nestjs/mongoose';
 
 @Module({
-  imports: [MongooseModule.forRoot("mongodb+srv://alimboyevjayxun007:jQHT0xNZIhNZGEv5@cluster0.nlou3gl.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"),
+  imports: [MongooseModule.forRoot("mongodb+srv://alimboyevjayxun007:ecW5TizRwqTXwrde@fastfoodbot.elc8enu.mongodb.net/?retryWrites=true&w=majority&appName=fastFoodBot"),
   ConfigModule.forRoot({ envFilePath: ".env", isGlobal: true }), BotModule]
 })
 export class AppModule { }

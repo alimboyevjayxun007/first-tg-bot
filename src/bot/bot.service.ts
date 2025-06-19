@@ -2,278 +2,495 @@ import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import * as TelegramBot from 'node-telegram-bot-api';
-import { User, UserDocument } from 'src/schema/bot.schema'; // UserDocument ni import qiling
-import { GoogleGenerativeAI, GenerativeModel, Part } from '@google/generative-ai';
+import { User, UserDocument } from 'src/schema/bot.schema';
 import axios from 'axios';
-
-interface Session {
-  questions: { question: string; answer: number }[];
-  current: number;
-  correct: number;
-}
 
 @Injectable()
 export class BotService {
   private bot: TelegramBot;
   private readonly ownerID: number = Number(process.env.OWNER_ID);
-  private userSessions: Map<number, Session> = new Map();
-  private aiModeUsers: Set<number> = new Set();
-  private genAI: GoogleGenerativeAI;
-  private aiModel: GenerativeModel;
+  private userOrders: Map<number, { name: string; price: number }[]> = new Map();
+  private processedMessageIds: Set<string> = new Set(); 
 
-  // `userModel` ni `Model<UserDocument>` sifatida belgilang
+  // Corrected image URLs to valid placeholders.
+  // IMPORTANT: Replace these with your actual hosted image URLs!
+  private products = {
+    'Ichimliklar': [
+      { name: 'Cola 1L', price: 12000, image: 'https://ru.freepik.com/free-ai-image/delicious-burger-with-fresh-ingredients_72554083.htm#fromView=keyword&page=1&position=0&uuid=b266d625-88de-4918-8e0f-b6482241840d&query=Fast+Food', description: 'Yangi va sovuq cola.' },
+      { name: 'Fanta 1L', price: 11000, image: 'https://ru.freepik.com/free-ai-image/delicious-burger-with-fresh-ingredients_72554083.htm#fromView=keyword&page=1&position=0&uuid=b266d625-88de-4918-8e0f-b6482241840d&query=Fast+Food', description: 'Apelsinli ichimlik.' },
+      { name: 'Sprite 1L', price: 11500, image: 'https://ru.freepik.com/free-ai-image/delicious-burger-with-fresh-ingredients_72554083.htm#fromView=keyword&page=1&position=0&uuid=b266d625-88de-4918-8e0f-b6482241840d&query=Fast+Food', description: 'Limon va Laymli gazli ichimlik.' }
+    ],
+    'Yeguliklar': [
+      { name: 'Burger', price: 25000, image: 'https://ru.freepik.com/free-ai-image/delicious-burger-with-fresh-ingredients_72554083.htm#fromView=keyword&page=1&position=0&uuid=b266d625-88de-4918-8e0f-b6482241840d&query=Fast+Food', description: 'Go\'shtli va mazali burger.' },
+      { name: 'Lavash', price: 20000, image: 'https://ru.freepik.com/free-ai-image/delicious-burger-with-fresh-ingredients_72554083.htm#fromView=keyword&page=1&position=0&uuid=b266d625-88de-4918-8e0f-b6482241840d&query=Fast+Food', description: 'Mazali va to\'yimli lavash.' },
+      { name: 'Hot Dog', price: 15000, image: 'https://ru.freepik.com/free-ai-image/delicious-burger-with-fresh-ingredients_72554083.htm#fromView=keyword&page=1&position=0&uuid=b266d625-88de-4918-8e0f-b6482241840d&query=Fast+Food', description: 'Klassik hot dog.' }
+    ],
+    'Shirinliklar': [
+      { name: 'Tort', price: 18000, image: 'https://ru.freepik.com/free-ai-image/delicious-burger-with-fresh-ingredients_72554083.htm#fromView=keyword&page=1&position=0&uuid=b266d625-88de-4918-8e0f-b6482241840d&query=Fast+Food', description: 'Shokoladli tort.' },
+      { name: 'Donut', price: 9000, image: 'https://ru.freepik.com/free-ai-image/delicious-burger-with-fresh-ingredients_72554083.htm#fromView=keyword&page=1&position=0&uuid=b266d625-88de-4918-8e0f-b6482241840d&query=Fast+Food', description: 'Shirin va yumshoq donut.' },
+      { name: 'Chizkeyk', price: 22000, image: 'https://ru.freepik.com/free-ai-image/delicious-burger-with-fresh-ingredients_72554083.htm#fromView=keyword&page=1&position=0&uuid=b266d625-88de-4918-8e0f-b6482241840d&query=Fast+Food', description: 'Yengil va mazali chizkeyk.' }
+    ]
+  }
+
   constructor(@InjectModel(User.name) private userModel: Model<UserDocument>) {
-    this.bot = new TelegramBot(process.env.BOT_TOKEN as string, { polling: true });
-    this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY as string);
-    this.aiModel = this.genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
+    if (!process.env.BOT_TOKEN) {
+      console.error("Error: BOT_TOKEN is not defined in environment variables.");
+      process.exit(1); 
+    }
+    if (!process.env.PAYMENT_PROVIDER_TOKEN) {
+      console.error("Warning: PAYMENT_PROVIDER_TOKEN is not defined. Payment functionalities might be limited.");
+    }
+    if (!process.env.OWNER_ID) {
+      console.error("Warning: OWNER_ID is not defined. Admin functionalities might be limited.");
+    }
 
-    // Commands
+    this.bot = new TelegramBot(process.env.BOT_TOKEN as string, { polling: true });
+
     this.bot.setMyCommands([
-      { command: '/start', description: "Botdan ro'yxatdan o'tish" },
-      { command: '/info', description: 'Bot haqida maʼlumot' },
-      { command: '/quiz', description: '10 ta matematik savol ishlash' },
-      { command: '/suniy_intellekt', description: 'AI bilan suhbat' },
+      { command: "/start", description: "Ro'yxatdan o'tish va menyuni ko'rish" },
+      { command: "/info", description: "Bot haqida ma'lumot" },
+      { command: "/myorder", description: "Mening buyurtmalarim" },
+      { command: "/clearorder", description: "Buyurtmani tozalash" }
     ]);
 
-    // Info
-    this.bot.onText(/\/info/, async (msg) => {
-      const chatId = msg.chat.id;
-      this.bot.sendMessage(chatId, "Bot sinov tariqasida yaratilgan va rivojlantirilmoqda.");
-    });
-
-    // Start
     this.bot.onText(/\/start/, async (msg) => {
       const chatId = msg.chat.id;
       const name = msg.from?.first_name;
+      const user = await this.userModel.findOne({ chatId });
 
-      if (chatId === this.ownerID) {
-        this.bot.sendMessage(chatId, "Siz owner qilib tayinlangan bo'lishingiz mumkin.");
-      } else {
-        // `user` ni `UserDocument | null` sifatida belgilash
-        const user: UserDocument | null = await this.userModel.findOne({ chatId });
-        if (!user) {
-          this.bot.sendMessage(
-            chatId,
-            `${name}, botdan ro'yxatdan o'tish uchun telefon raqamingizni jo'nating.`,
-            {
-              reply_markup: {
-                keyboard: [
-                  [{ text: "Telefon raqamimni jo'natish", request_contact: true }]
-                ],
-                resize_keyboard: true,
-                one_time_keyboard: true,
-              },
-            }
-          );
-        } else {
-          this.bot.sendMessage(chatId, `${name}, siz allaqachon ro'yxatdan o'tgansiz`);
-          this.bot.sendMessage(chatId, "Sizga qanday yordam bera olaman?", {
-            reply_markup: {
-              remove_keyboard: true
-            }
-          });
-        }
+      if (!user || !user.phoneNumber) {
+        this.promptForPhoneNumber(chatId, name);
+        return;
       }
+
+      this.userOrders.set(chatId, []); 
+
+      // Added "Manzilni yuborish" button to the main menu
+      this.bot.sendMessage(chatId, `Assalomu alaykum, ${name}! Mazza Food botiga xush kelibsiz.`, {
+        reply_markup: {
+          keyboard: [
+            [{ text: "Ichimliklar" }],
+            [{ text: "Yeguliklar" }],
+            [{ text: "Shirinliklar" }],
+            [{ text: "Manzilni yuborish", request_location: true }] // New button for location
+          ],
+          resize_keyboard: true,
+        },
+      });
     });
 
-    // Quiz
-    this.bot.onText(/\/quiz/, (msg) => {
+    this.bot.onText(/\/info/, async (msg) => {
       const chatId = msg.chat.id;
-      const questions = this.generateQuestions();
-      this.userSessions.set(chatId, { questions, current: 0, correct: 0 });
-      this.bot.sendMessage(chatId, `1-savol: ${questions[0].question} = ?`);
+      const user = await this.userModel.findOne({ chatId });
+      if (!user || !user.phoneNumber) {
+        this.promptForPhoneNumber(chatId, msg.from?.first_name);
+        return;
+      }
+      this.bot.sendMessage(chatId, "Mazza Food tezkor va mazali ovqatlar shaxobchasining ovqat buyurtma qilish uchun telegram boti! Bizning shiorimiz: Tez, Mazali, Sifatli!");
     });
 
-    // Sun'iy intellekt rejimini yoqish
-    this.bot.onText(/\/suniy_intellekt/, (msg) => {
+    this.bot.onText(/\/myorder/, async (msg) => {
       const chatId = msg.chat.id;
-      const name = msg.from?.first_name || 'foydalanuvchi';
-      this.aiModeUsers.add(chatId);
-      this.bot.sendMessage(chatId, `Salom ${name}, men sun'iy intellektman. Sizga qanday yordam bera olaman?`);
+      const user = await this.userModel.findOne({ chatId });
+      if (!user || !user.phoneNumber) {
+        this.promptForPhoneNumber(chatId, msg.from?.first_name);
+        return;
+      }
+
+      const order = this.userOrders.get(chatId) || [];
+      if (order.length === 0) {
+        this.bot.sendMessage(chatId, "Sizda hozircha buyurtmalar yo'q. Menyudan mahsulot tanlang.");
+        return;
+      }
+
+      const total = order.reduce((sum, item) => sum + item.price, 0);
+      const orderList = order.map((item, index) => `${index + 1}. ${item.name} - ${item.price} so'm`).join('\n');
+      this.bot.sendMessage(chatId, `🧾 **Mening buyurtmalarim:**\n${orderList}\n\n**💰 Jami:** ${total} so'm`, { parse_mode: 'Markdown' });
     });
 
-    // Message listener
+    this.bot.onText(/\/clearorder/, async (msg) => {
+      const chatId = msg.chat.id;
+      const user = await this.userModel.findOne({ chatId });
+      if (!user || !user.phoneNumber) {
+        this.promptForPhoneNumber(chatId, msg.from?.first_name);
+        return;
+      }
+
+      this.userOrders.set(chatId, []);
+      this.bot.sendMessage(chatId, "✅ Buyurtmangiz tozalandi.");
+    });
+
     this.bot.on('message', async (msg) => {
+      if (msg.text && msg.text.startsWith('/')) { 
+        return;
+      }
+
+      // Check for processed messages (e.g., duplicate callback queries)
+      if (this.isMessageProcessed(msg.message_id.toString())) {
+        return;
+      }
+      this.addProcessedMessage(msg.message_id.toString());
+
       const chatId = msg.chat.id;
       const name = msg.from?.first_name;
-      const userid = Number(msg.reply_to_message?.text?.split(',')[0]);
+      const text = msg.text;
+      const user = await this.userModel.findOne({ chatId });
 
-      // Foydalanuvchining telefon raqamini qabul qilish
       if (msg.contact) {
         const phoneNumber = msg.contact.phone_number;
         const userIdFromContact = msg.contact.user_id;
 
         if (chatId === userIdFromContact) {
-          // `user` ni `UserDocument | null` sifatida belgilash
-          let user: UserDocument | null = await this.userModel.findOne({ chatId });
-
-          if (!user) {
-            user = await this.userModel.create({
-              name: name,
-              chatId: chatId,
-              phoneNumber: phoneNumber,
-            });
+          let updatedUser = await this.userModel.findOne({ chatId });
+          if (!updatedUser) {
+            updatedUser = await this.userModel.create({ name, chatId, phoneNumber });
             this.bot.sendMessage(this.ownerID, `Yangi foydalanuvchi ro'yxatdan o'tdi: ${name}, Raqami: ${phoneNumber}`);
             this.bot.sendMessage(chatId, `Rahmat, ${name}! Siz ro'yxatdan o'tdingiz. Telefon raqamingiz: ${phoneNumber}`);
-            this.bot.sendMessage(chatId, "Endi siz botning barcha funksiyalaridan foydalanishingiz mumkin.", {
-              reply_markup: {
-                remove_keyboard: true
-              }
-            });
-          } else if (!user.phoneNumber) {
-            // TypeScript'ga `user` ning `phoneNumber` xususiyati borligini aytish
-            user.phoneNumber = phoneNumber;
-            await user.save();
+          } else if (!updatedUser.phoneNumber) {
+            updatedUser.phoneNumber = phoneNumber;
+            await updatedUser.save();
             this.bot.sendMessage(this.ownerID, `Foydalanuvchi ${name} raqamini yangiladi: ${phoneNumber}`);
             this.bot.sendMessage(chatId, `Telefon raqamingiz yangilandi: ${phoneNumber}`);
-            this.bot.sendMessage(chatId, "Endi siz botning barcha funksiyalaridan foydalanishingiz mumkin.", {
-              reply_markup: {
-                remove_keyboard: true
-              }
-            });
           } else {
             this.bot.sendMessage(chatId, "Sizning raqamingiz allaqachon ro'yxatdan o'tgan.");
           }
+          // After successful registration/update, send the main menu including location button
+          this.bot.sendMessage(chatId, "Endi siz botning barcha funksiyalaridan foydalanishingiz mumkin.", {
+            reply_markup: { remove_keyboard: true }, // Remove the one-time contact keyboard
+          });
+          this.bot.sendMessage(chatId, `Menyuni tanlang:`, {
+            reply_markup: {
+              keyboard: [
+                [{ text: "Ichimliklar" }],
+                [{ text: "Yeguliklar" }],
+                [{ text: "Shirinliklar" }],
+                [{ text: "Manzilni yuborish", request_location: true }] // New button for location
+              ],
+              resize_keyboard: true,
+            },
+          });
         } else {
           this.bot.sendMessage(chatId, "Noto'g'ri telefon raqami yuborildi. Iltimos, o'zingizning raqamingizni yuboring.");
         }
+        return; 
+      }
+
+      // **Enforce phone number registration before proceeding with other commands/messages**
+      // This check is crucial to prevent users from bypassing registration.
+      if (!user || !user.phoneNumber) {
+        this.promptForPhoneNumber(chatId, name);
         return;
       }
 
-      // AI rejimi faollashtirilgan foydalanuvchi
-      if (this.aiModeUsers.has(chatId)) {
-        if (msg.photo) {
-          await this.bot.sendChatAction(chatId, 'upload_photo');
-          await this.bot.sendMessage(chatId, "Rasmni tahlil qilmoqdaman. Bu bir necha soniya vaqt olishi mumkin, iltimos kuting...");
-          const fileId = msg.photo[msg.photo.length - 1].file_id;
+      // Handle category selection (Ichimliklar, Yeguliklar, Shirinliklar)
+      if (text && this.products[text]) {
+        this.sendProducts(chatId, text, this.products[text]);
+        return; 
+      }
 
+      if (msg.location) {
+        this.bot.sendMessage(chatId, "Manzilingiz qabul qilindi. Buyurtmangiz shu manzilga yetkaziladi.");
+        this.bot.sendLocation(this.ownerID, msg.location.latitude, msg.location.longitude);
+        this.bot.sendMessage(this.ownerID, `Yangi buyurtma uchun yetkazib berish manzili: ${chatId}, ${name} dan.`);
+        return;
+      }
+
+      // Owner reply functionality
+      if (chatId === this.ownerID && msg.reply_to_message) {
+        const originalText = msg.reply_to_message.text || msg.reply_to_message.caption || '';
+        const userIdMatch = originalText.match(/^(\d+),/); 
+
+        if (userIdMatch) {
+          const targetUserId = Number(userIdMatch[1]);
           try {
-            const fileLink = await this.bot.getFileLink(fileId);
-            const imageBuffer = await this.downloadFile(fileLink);
-            const base64Image = imageBuffer.toString('base64');
-            const mimeType = 'image/jpeg';
+            if (msg.text) await this.bot.sendMessage(targetUserId, `Yaratuvchidan: ${msg.text}`);
+            else if (msg.voice) await this.bot.sendVoice(targetUserId, msg.voice.file_id);
+            else if (msg.video) await this.bot.sendVideo(targetUserId, msg.video.file_id);
+            else if (msg.video_note) await this.bot.sendVideoNote(targetUserId, msg.video_note.file_id);
+            else if (msg.photo) await this.bot.sendPhoto(targetUserId, msg.photo[msg.photo.length - 1].file_id);
 
-            const promptText = msg.caption || "Bu rasmda nima borligini tahlil qil?";
-
-            const reply = await this.askGeminiWithImage(promptText, base64Image, mimeType);
-            this.bot.sendMessage(chatId, reply);
+            this.bot.sendMessage(this.ownerID, `✅ Xabar ${targetUserId} ga yuborildi.`);
           } catch (error) {
-            console.error("Rasm tahlilida xatolik:", error);
-            this.bot.sendMessage(chatId, "Rasmni tahlil qilishda xatolik yuz berdi. Iltimos, keyinroq urinib ko'ring.");
+            console.error(`Xabarni ${targetUserId} ga yuborishda xatolik:`, error);
+            this.bot.sendMessage(this.ownerID, `Xabarni ${targetUserId} ga yuborishda xatolik yuz berdi.`);
           }
-        } else if (msg.text && !msg.text.startsWith('/')) {
-          await this.bot.sendChatAction(chatId, 'typing');
-          await this.bot.sendMessage(chatId, "Sizning so'rovingizni qayta ishlamoqdaman. Bu bir necha soniya vaqt olishi mumkin, iltimos kuting...");
-          try {
-            const reply = await this.askGemini(msg.text);
-            this.bot.sendMessage(chatId, reply);
-          } catch (error) {
-            console.error("AI bilan suhbatda xatolik:", error);
-            this.bot.sendMessage(chatId, "Sun'iy intellektdan javob olayotganda kutilmagan xatolik yuz berdi. Iltimos, keyinroq urinib ko'ring.");
-          }
-        } else if (msg.video) {
-             this.bot.sendMessage(chatId, "Hozircha videoni tahlil qilish imkoniyati yo'q. Faqat rasmlarni tahlil qila olaman.");
+        } else {
+          this.bot.sendMessage(this.ownerID, "❌ Replydan chat ID topilmadi. Iltimos, reply formatiga e’tibor bering (ID, text...).");
         }
-        return;
+        return; 
       }
 
-      // Owner reply
-      if (chatId === this.ownerID && userid) {
-        if (msg.text) this.bot.sendMessage(userid, `Ustozdan xabar: ${msg.text}`);
-        if (msg.voice) this.bot.sendVoice(userid, msg.voice.file_id);
-        if (msg.photo) this.bot.sendPhoto(userid, msg.photo[0].file_id);
-        return;
+      // Broadcast functionality for owner
+      if (chatId === this.ownerID && !msg.reply_to_message) {
+        await this.sendBroadcast(msg);
+        return; 
       }
 
-      // Quiz mode
-      if (chatId !== this.ownerID && !msg.text?.startsWith('/')) {
-        const session = this.userSessions.get(chatId);
-        if (session) {
-          const userAnswer = parseInt(`${msg.text}`);
-          const currentQ = session.questions[session.current];
+      // Handle unrecognised messages for non-owner users
+      if (chatId !== this.ownerID) {
+        let ownerMessage = `${chatId}, ${name} dan yangi xabar:\n`;
+        if (msg.text) ownerMessage += `**Matn:** ${msg.text}`;
+        else if (msg.voice) ownerMessage += `**Ovozli xabar**`;
+        else if (msg.photo) ownerMessage += `**Rasm**`;
+        else if (msg.video) ownerMessage += `**Video**`;
+        else if (msg.video_note) ownerMessage += `**Video qayd**`;
+        else if (msg.contact) ownerMessage += `**Kontakt**`;
+        else if (msg.location) ownerMessage += `**Joylashuv**`;
+        else ownerMessage += `**Noma'lum turdagi xabar**`;
 
-          if (userAnswer === currentQ.answer) session.correct++;
+        this.bot.sendMessage(this.ownerID, ownerMessage, { parse_mode: 'Markdown' });
 
-          session.current++;
+        if (text && !text.startsWith('/')) { // Only send this if it's not a recognized command
+          this.bot.sendMessage(chatId, "Uzr, men sizni tushunmadim. Menyudan tanlang yoki buyruqlardan foydalaning.");
+        }
+      }
+    });
 
-          if (session.current < session.questions.length) {
-            const nextQ = session.questions[session.current];
-            this.bot.sendMessage(chatId, `${session.current + 1}-savol: ${nextQ.question} = ?`);
-          } else {
-            this.bot.sendMessage(
-              chatId,
-              ` Test yakunlandi: Siz ${session.correct} / ${session.questions.length} ta savolga to'g'ri javob berdingiz.`
-            );
-            this.bot.sendMessage(chatId, ` Yana ishlamoqchimisiz? /quiz buyrug'ini bosing`);
-            this.userSessions.delete(chatId);
+    this.bot.on('callback_query', async (query) => {
+      const chatId = query.message?.chat.id;
+      const data = query.data;
+      if (!chatId || !data) return;
+
+      // Check if user is registered (has phone number) before processing callback queries
+      const user = await this.userModel.findOne({ chatId });
+      if (!user || !user.phoneNumber) {
+          await this.bot.answerCallbackQuery(query.id, { text: "Iltimos, avval telefon raqamingizni ro'yxatdan o'tkazing." });
+          this.promptForPhoneNumber(chatId, user?.name || query.from?.first_name);
+          return;
+      }
+
+      if (this.isMessageProcessed(query.id.toString())) {
+        this.bot.answerCallbackQuery(query.id); 
+        return;
+      }
+      this.addProcessedMessage(query.id.toString());
+
+      if (data.startsWith('buy_')) {
+        const [, name, priceStr] = data.split('_');
+        const price = parseInt(priceStr);
+        const order = this.userOrders.get(chatId) || [];
+        order.push({ name, price });
+        this.userOrders.set(chatId, order);
+
+        const total = order.reduce((sum, item) => sum + item.price, 0);
+        await this.bot.answerCallbackQuery(query.id, { text: `✅ "${name}" tanlandi! Jami: ${total} so'm` });
+
+        // Update the message with new inline keyboard options for ordering
+        this.bot.sendMessage(chatId, `"${name}" buyurtmangizga qo'shildi. Joriy summa: ${total} so'm.`, {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "Yana buyurtma berish", callback_data: 'continue_ordering' }],
+              [{ text: "Buyurtmani ko'rish", callback_data: 'view_order' }],
+              [{ text: "To'lovga o'tish", callback_data: 'checkout' }]
+            ]
           }
+        });
+
+      } else if (data === 'checkout') {
+        const order = this.userOrders.get(chatId) || [];
+        if (order.length === 0) {
+          await this.bot.answerCallbackQuery(query.id, { text: "Buyurtma berilmagan. Avval buyurtma bering." });
+          this.bot.sendMessage(chatId, "Buyurtma berilmagan. Avval menyudan mahsulot tanlang.");
           return;
         }
 
-        // Oddiy foydalanuvchi xabarlari (AI rejimi yoqilmagan bo'lsa va raqam jo'natilmagan bo'lsa)
-        this.bot.sendMessage(this.ownerID, `${chatId}, ${name} dan xabar: ${msg.text || '[Mediya yuborildi]'}`);
-        if (msg.voice) this.bot.sendVoice(this.ownerID, msg.voice.file_id);
-        if (msg.photo) this.bot.sendPhoto(this.ownerID, msg.photo[0].file_id);
+        const total = order.reduce((sum, item) => sum + item.price, 0);
+        const orderSummary = order.map((o, idx) => `${idx + 1}. ${o.name} - ${o.price} so'm`).join('\n');
+
+        await this.bot.answerCallbackQuery(query.id, { text: "Buyurtmangiz tayyor! To'lovga o'tishingiz mumkin." });
+        this.bot.sendMessage(chatId, `🧾 **Sizning buyurtmangiz:**\n${orderSummary}\n\n**💰 Umumiy:** ${total} so'm\n\nBuyurtmani yakunlash uchun pastdagi tugmani bosing:`, {
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[{ text: "Buyurtmani tasdiqlash va to'lash", callback_data: 'confirm_payment' }]]
+          }
+        });
+      } else if (data === 'confirm_payment') {
+        const order = this.userOrders.get(chatId) || [];
+        if (order.length === 0) {
+          await this.bot.answerCallbackQuery(query.id, { text: "Buyurtma mavjud emas." });
+          return;
+        }
+        const totalAmount = order.reduce((sum, item) => sum + item.price, 0);
+        const invoiceTitle = "Fast Food Buyurtmasi";
+        const invoiceDescription = order.map(item => `${item.name}`).join(', ');
+
+        const prices = order.map(item => ({ label: item.name, amount: item.price * 100 }));
+
+        await this.bot.answerCallbackQuery(query.id, { text: "To'lov oynasini ochamiz..." });
+        this.bot.sendInvoice(chatId, invoiceTitle, invoiceDescription, "fastfood_order", process.env.PAYMENT_PROVIDER_TOKEN as string, "UZS", prices,
+          {
+            need_phone_number: true,
+            need_shipping_address: true,
+            need_name: true, // Requesting name
+            need_email: false, // You can set this to true if you need email
+            is_flexible: false, 
+          }
+        ).catch(e => {
+          console.error("Error sending invoice:", e.message);
+          this.bot.sendMessage(chatId, "To'lov xizmatida xatolik yuz berdi. Iltimos, keyinroq urinib ko'ring.");
+        });
+      } else if (data === 'view_order') {
+        await this.bot.answerCallbackQuery(query.id); 
+        const order = this.userOrders.get(chatId) || [];
+        if (order.length === 0) {
+          this.bot.sendMessage(chatId, "Sizda hozircha buyurtmalar yo'q.");
+          return;
+        }
+        const total = order.reduce((sum, item) => sum + item.price, 0);
+        const orderList = order.map((item, index) => `${index + 1}. ${item.name} - ${item.price} so'm`).join('\n');
+        this.bot.sendMessage(chatId, `🧾 **Mening buyurtmalarim:**\n${orderList}\n\n**💰 Jami:** ${total} so'm`, { parse_mode: 'Markdown' });
+      } else if (data === 'continue_ordering') {
+        await this.bot.answerCallbackQuery(query.id); 
+        this.bot.sendMessage(chatId, "Yana nimani buyurtma qilasiz?", {
+          reply_markup: {
+            keyboard: [
+              [{ text: "Ichimliklar" }],
+              [{ text: "Yeguliklar" }],
+              [{ text: "Shirinliklar" }],
+              [{ text: "Manzilni yuborish", request_location: true }] // New button for location
+            ],
+            resize_keyboard: true,
+          },
+        });
+      }
+    });
+
+    this.bot.on('pre_checkout_query', (query) => {
+      this.bot.answerPreCheckoutQuery(query.id, true); 
+    });
+
+    this.bot.on('successful_payment', async (msg) => {
+      const chatId = msg.chat.id;
+
+      if (!msg.successful_payment) {
+        console.error("Successful payment xabarida successful_payment obyekti topilmadi.");
+        return;
+      }
+
+      const paymentInfo = msg.successful_payment;
+      const totalAmount = paymentInfo.total_amount / 100;
+      const order = this.userOrders.get(chatId) || [];
+      const orderSummary = order.map(item => item.name).join(', ');
+
+      this.bot.sendMessage(chatId, `✅ To'lovingiz qabul qilindi! Jami: ${totalAmount} so'm. Buyurtmangiz (${orderSummary}) tez orada yetkazib beriladi!`);
+
+      const orderDetails = paymentInfo.order_info;
+      const shippingAddress = orderDetails?.shipping_address;
+      const userName = orderDetails?.name || 'Nomaʼlum'; // Get name from order_info
+      const phoneNumber = orderDetails?.phone_number || 'Nomaʼlum telefon'; // Get phone from order_info
+
+      const city = shippingAddress?.city || 'Nomaʼlum shahar';
+      const streetLine1 = shippingAddress?.street_line1 || 'Nomaʼlum koʻcha';
+      const streetLine2 = shippingAddress?.street_line2 ? `, ${shippingAddress.street_line2}` : '';
+      const postCode = shippingAddress?.post_code ? `, Pochta indeksi: ${shippingAddress.post_code}` : ''; // Add postcode
+
+      this.bot.sendMessage(this.ownerID,
+        `Yangi to'lov qabul qilindi: ${chatId}, ${userName} dan.\n` + // Use collected name
+        `Buyurtma: ${orderSummary}.\n` +
+        `Jami: ${totalAmount} so'm.\n` +
+        `Manzil: ${city}, ${streetLine1}${streetLine2}${postCode}.\n` + // Include postcode
+        `Telefon: ${phoneNumber}`
+      );
+
+      this.userOrders.delete(chatId);
+    });
+  }
+
+  private async sendProducts(chatId: number, category: string, products: { name: string; price: number; image: string; description: string }[]) {
+    await this.bot.sendMessage(chatId, `**${category}** bo'limidagi mahsulotlar:`, { parse_mode: 'Markdown' });
+    for (const product of products) {
+      try { // Added try-catch block here
+        await this.bot.sendPhoto(chatId, product.image, {
+          caption: `🍽 **${product.name}**\n💵 ${product.price} so'm\n📝 _${product.description}_`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[
+              { text: `🛒 Buyurtma berish (${product.price} so'm)`, callback_data: `buy_${product.name}_${product.price}` }
+            ]]
+          }
+        });
+      } catch (error) {
+        console.error(`Error sending photo for ${product.name} from URL: ${product.image}`, error.message);
+        // Optionally, send a text message instead if photo fails
+        await this.bot.sendMessage(chatId, `🍽 **${product.name}**\n💵 ${product.price} so'm\n📝 _${product.description}_\n\n(Rasmni yuklashda xatolik yuz berdi. Iltimos, administratorga murojaat qiling.)`, {
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[
+              { text: `🛒 Buyurtma berish (${product.price} so'm)`, callback_data: `buy_${product.name}_${product.price}` }
+            ]]
+          }
+        });
+      }
+    }
+    this.bot.sendMessage(chatId, `Yuqoridan mahsulot tanlashingiz mumkin.`, {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "Buyurtmani ko'rish", callback_data: 'view_order' }],
+          [{ text: "To'lovga o'tish", callback_data: 'checkout' }],
+          [{ text: "Menyuga qaytish", callback_data: 'continue_ordering' }]
+        ]
       }
     });
   }
 
-  private generateQuestions(count = 10): { question: string; answer: number }[] {
-    const questions: { question: string; answer: number }[] = [];
-
-    for (let i = 0; i < count; i++) {
-      const a = Math.floor(Math.random() * 10);
-      const b = Math.floor(Math.random() * 10);
-
-      questions.push({
-        question: `${a} + ${b}`,
-        answer: a + b,
-      });
-    }
-
-    return questions;
-  }
-
-  private async askGemini(prompt: string): Promise<string> {
-    try {
-      const result = await this.aiModel.generateContent(prompt);
-      const response = await result.response;
-      const text = response.text();
-      return text || "Kechirasiz, tushunmadim. Boshqa savol bering.";
-    } catch (error) {
-      console.error("Gemini SDK (matn) chaqiruvida xatolik yuz berdi:", error);
-      return "Sun'iy intellektdan javob olayotganda xatolik yuz berdi. Iltimos, keyinroq urinib ko'ring.";
-    }
-  }
-
-  private async askGeminiWithImage(prompt: string, base64Image: string, mimeType: string): Promise<string> {
-    try {
-      const imagePart: Part = {
-        inlineData: {
-          data: base64Image,
-          mimeType: mimeType,
+  private async promptForPhoneNumber(chatId: number, name?: string | null) {
+    const userName = name || 'foydalanuvchi';
+    this.bot.sendMessage(
+      chatId,
+      `${userName}, botdan to'liq foydalanish uchun iltimos, telefon raqamingizni jo'natish tugmasini bosing. Raqamingizsiz bot funksiyalaridan foydalana olmaysiz.`,
+      {
+        reply_markup: {
+          keyboard: [
+            [{ text: "Telefon raqamimni jo'natish", request_contact: true }]
+          ],
+          resize_keyboard: true,
+          one_time_keyboard: true,
         },
-      };
-
-      const parts: Part[] = [];
-      if (prompt) {
-        parts.push({ text: prompt });
       }
-      parts.push(imagePart);
-
-      const result = await this.aiModel.generateContent({
-        contents: [{ role: 'user', parts: parts }],
-      });
-
-      const response = result.response; // .response Property must be used correctly.
-      const text = response.text();
-      return text || "Rasmni tahlil qilishda muammo yuz berdi yoki javob topilmadi.";
-    } catch (error) {
-      console.error("Gemini SDK (rasm) chaqiruvida xatolik yuz berdi:", error);
-      return "Rasmni tahlil qilishda xatolik yuz berdi. Iltimos, keyinroq urinib ko'ring.";
-    }
+    );
   }
 
+  private isMessageProcessed(id: string): boolean {
+    return this.processedMessageIds.has(id);
+  }
+
+  private addProcessedMessage(id: string) {
+    this.processedMessageIds.add(id);
+    // Keep messages processed for 10 minutes to avoid rapid-fire duplicate processing
+    setTimeout(() => {
+      this.processedMessageIds.delete(id);
+    }, 10 * 60 * 1000); 
+  }
+
+  private async sendBroadcast(msg: TelegramBot.Message) {
+    const users = await this.userModel.find({}, 'chatId');
+
+    for (const user of users) {
+      const targetChatId = user.chatId;
+      if (targetChatId === this.ownerID) continue; // Don't send broadcast to owner
+
+      try {
+        // Send various message types for broadcast
+        if (msg.text) await this.bot.sendMessage(targetChatId, msg.text);
+        else if (msg.photo) await this.bot.sendPhoto(targetChatId, msg.photo[msg.photo.length - 1].file_id, { caption: msg.caption || '' });
+        else if (msg.video) await this.bot.sendVideo(targetChatId, msg.video.file_id, { caption: msg.caption || '' });
+        else if (msg.voice) await this.bot.sendVoice(targetChatId, msg.voice.file_id, { caption: msg.caption || '' });
+        else if (msg.video_note) await this.bot.sendVideoNote(targetChatId, msg.video_note.file_id);
+        else if (msg.contact) await this.bot.sendContact(targetChatId, msg.contact.phone_number, msg.contact.first_name, { last_name: msg.contact.last_name || undefined });
+        else if (msg.location) await this.bot.sendLocation(targetChatId, msg.location.latitude, msg.location.longitude);
+      } catch (error: any) {
+        console.error(`Xabarni ${targetChatId} ga yuborishda xatolik:`, error.message);
+        // If user blocked the bot, remove them from DB
+        if (error.response && error.response.statusCode === 403) {
+          console.log(`Foydalanuvchi ${targetChatId} botni bloklagan. Ma'lumotlar bazasidan o'chirilmoqda...`);
+          await this.userModel.deleteOne({ chatId: targetChatId });
+        }
+      }
+    }
+    this.bot.sendMessage(this.ownerID, "✅ Barcha faol foydalanuvchilarga xabar yuborildi!");
+  }
+
+  // This function is not used in the provided code, but kept if needed for file operations
   private async downloadFile(fileUrl: string): Promise<Buffer> {
     const response = await axios.get(fileUrl, { responseType: 'arraybuffer' });
     return Buffer.from(response.data);
